@@ -18,14 +18,35 @@ WHY validate type at creation time:
     Failing loudly at startup (when create_metrics() is called) rather than at
     the first .add() call makes misconfiguration obvious during integration
     testing and local development, not silently in production.
+
+WHY MetricSpec TypedDict:
+    Gives mypy and IDEs a precise schema for the spec dict without introducing
+    a separate DSL or code generation step. total=False makes description and
+    unit optional fields, matching the runtime defaults applied below.
 """
 
 from __future__ import annotations
+
+from typing import TypedDict
 
 from ._provider import get_meter
 from ._types import Counter, Gauge, Histogram
 
 VALID_TYPES = frozenset({"counter", "histogram", "gauge"})
+
+
+class MetricSpec(TypedDict, total=False):
+    """Schema for a single metric entry in the create_metrics() spec dict.
+
+    Attributes:
+        type:        Required. One of "counter", "histogram", "gauge".
+        description: Human-readable description of what this metric measures.
+        unit:        OTEL unit string (e.g. "1", "ms", "By"). Defaults to "1".
+    """
+
+    type: str        # required — validated at runtime
+    description: str
+    unit: str
 
 
 class BusinessMetrics:
@@ -38,20 +59,21 @@ class BusinessMetrics:
     pass
 
 
-def create_metrics(spec: dict[str, dict]) -> BusinessMetrics:
+def create_metrics(spec: dict[str, MetricSpec]) -> BusinessMetrics:
     """Create and return a BusinessMetrics instance from a spec dict.
 
     Args:
-        spec: Mapping of metric name → dict with keys:
+        spec: Mapping of metric name → MetricSpec with keys:
               - type (required): "counter" | "histogram" | "gauge"
-              - description (required): human-readable description
+              - description (optional): human-readable description
               - unit (optional): OTEL unit string, defaults to "1"
 
     Returns:
         BusinessMetrics instance with one attribute per metric name.
 
     Raises:
-        ValueError: If a metric type is not one of counter/histogram/gauge.
+        ValueError: If a metric type is not one of counter/histogram/gauge,
+                    or if the "type" key is missing from a spec entry.
         RuntimeError: If configure_metrics() was not called before this.
     """
     meter = get_meter("neoflo.business")
@@ -59,6 +81,12 @@ def create_metrics(spec: dict[str, dict]) -> BusinessMetrics:
 
     for name, meta in spec.items():
         metric_type = meta.get("type", "").lower()
+
+        if not metric_type:
+            raise ValueError(
+                f"Missing 'type' key for metric '{name}'. "
+                f"Must be one of: {', '.join(sorted(VALID_TYPES))}"
+            )
 
         if metric_type not in VALID_TYPES:
             raise ValueError(
@@ -75,7 +103,7 @@ def create_metrics(spec: dict[str, dict]) -> BusinessMetrics:
                 description=description,
                 unit=unit,
             )
-            instrument = Counter(otel_instrument)
+            instrument: Counter | Histogram | Gauge = Counter(otel_instrument)
 
         elif metric_type == "histogram":
             otel_instrument = meter.create_histogram(

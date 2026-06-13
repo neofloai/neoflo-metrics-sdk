@@ -23,13 +23,14 @@ WHY exception handling wraps ONLY the metrics code:
     the same try/except, a metrics failure would silently swallow request
     errors, making debugging extremely difficult. The structure is:
 
+        instruments, base_labels = None, {}   # sentinels — always defined
         try:
             [metrics pre-request]
         except:
-            pass
-        response = await call_next(request)   # <-- never swallowed
+            instruments = None  # disable post-request recording
+        response = await call_next(request)   # <-- never inside a swallowing except
         try:
-            [metrics post-request]
+            [metrics post-request, guarded by instruments is not None]
         except:
             pass
         return response
@@ -39,12 +40,21 @@ WHY extract route from scope["route"]:
     (e.g., /users/123). Using the route template (/users/{user_id}) gives
     bounded cardinality in metric labels — critical for time-series databases
     that struggle with high-cardinality label values.
+
+WHY sentinels are declared before the try block:
+    Declaring `instruments: dict | None = None` and `base_labels: dict = {}`
+    before the try block ensures they are always defined at the post-request
+    guard check, regardless of where inside the try block an exception fires.
+    Relying on assignment inside the except block alone leaves the variables
+    undefined if the exception fires before the assignment is reached.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -55,15 +65,23 @@ from ._infra import get_http_instruments
 
 logger = logging.getLogger(__name__)
 
+# Type alias for the call_next callable passed by Starlette's middleware chain.
+RequestResponseEndpoint = Callable[[Request], Awaitable[Response]]
+
 
 class MetricsMiddleware(BaseHTTPMiddleware):
     """Automatic HTTP metrics middleware for Starlette/FastAPI."""
 
-    async def dispatch(self, request: Request, call_next) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         # Resolve route template early; fall back to raw path if routing hasn't
         # matched yet (e.g., 404 for unknown paths).
         route = _extract_route(request)
         method = request.method
+
+        # Sentinel defaults — declared before any try block so they are always
+        # defined at the post-request guard, regardless of where an exception fires.
+        instruments: dict[str, Any] | None = None
+        base_labels: dict[str, str] = {}
 
         # --- Pre-request metrics (best-effort, never crash the app) ---
         try:
@@ -74,7 +92,6 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         except Exception:
             logger.exception("MetricsMiddleware: failed to record pre-request metrics")
             instruments = None  # Disable post-request metrics too.
-            base_labels = {}
 
         # --- Actual request handling — MUST NOT be inside a metrics try/except ---
         # perf_counter gives monotonic, high-resolution timing unaffected by NTP.

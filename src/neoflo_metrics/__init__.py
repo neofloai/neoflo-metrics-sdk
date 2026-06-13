@@ -20,9 +20,18 @@ WHY eager SystemMetricsCollector startup here:
     start, not from when the first HTTP request arrives. This matters for
     batch workers or services with slow startup that might take minutes to
     serve their first request.
+
+WHY a single _initialized flag guards all three setup steps:
+    initialize_provider() is idempotent on its own, but set_config() would
+    silently overwrite the config and SystemMetricsCollector().start() would
+    spawn a second daemon thread on a second call. Rather than adding guards
+    in each helper, we front-load the check here so configure_metrics() is
+    fully idempotent as a unit. This matches the semantics of logging.basicConfig().
 """
 
 from __future__ import annotations
+
+import threading
 
 from ._business import BusinessMetrics, create_metrics
 from ._config import MetricsConfig, get_config, set_config
@@ -36,6 +45,11 @@ __all__ = [
     "BusinessMetrics",
 ]
 
+# Guards against double-initialization (e.g., configure_metrics() called twice
+# in tests or by misconfigured service startup code).
+_initialized = False
+_init_lock = threading.Lock()
+
 
 def configure_metrics(
     service_name: str,
@@ -45,6 +59,10 @@ def configure_metrics(
 ) -> None:
     """Initialize the metrics SDK. Call exactly once at process startup.
 
+    Subsequent calls are no-ops — the first call wins. This mirrors the
+    behaviour of Python's logging.basicConfig() and avoids leaking exporter
+    connections or background threads on duplicate calls.
+
     Args:
         service_name:      Identifier for this service (e.g., "invoice-validator-be").
                            Attached as a label to all infrastructure metrics.
@@ -53,25 +71,35 @@ def configure_metrics(
         environment:       Deployment environment label ("production", "staging", etc.).
         export_interval_ms: How often to push metrics to the collector, in ms.
                            Lower values increase freshness but add collector load.
-
-    Raises:
-        RuntimeError: If called after the provider is already initialized
-                      (safe to ignore in test environments that reset state).
     """
-    cfg = MetricsConfig(
-        service_name=service_name,
-        otlp_endpoint=otlp_endpoint,
-        environment=environment,
-        export_interval_ms=export_interval_ms,
-    )
+    global _initialized
 
-    set_config(cfg)
+    # Fast path — already initialized, no work needed.
+    if _initialized:
+        return
 
-    # Initialize OTel MeterProvider and register it globally so that
-    # opentelemetry-instrumentation-* libraries use the same backend.
-    initialize_provider(cfg)
+    with _init_lock:
+        # Re-check inside the lock to handle concurrent startup (e.g., multiple
+        # uvicorn worker processes calling configure_metrics at the same time).
+        if _initialized:
+            return
 
-    # Start system metrics collection immediately — not on first request —
-    # so uptime and resource metrics are available from process boot.
-    collector = SystemMetricsCollector()
-    collector.start()
+        cfg = MetricsConfig(
+            service_name=service_name,
+            otlp_endpoint=otlp_endpoint,
+            environment=environment,
+            export_interval_ms=export_interval_ms,
+        )
+
+        set_config(cfg)
+
+        # Initialize OTel MeterProvider and register it globally so that
+        # opentelemetry-instrumentation-* libraries use the same backend.
+        initialize_provider(cfg)
+
+        # Start system metrics collection immediately — not on first request —
+        # so uptime and resource metrics are available from process boot.
+        collector = SystemMetricsCollector()
+        collector.start()
+
+        _initialized = True

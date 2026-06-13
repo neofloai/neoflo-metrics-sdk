@@ -19,6 +19,14 @@ WHY set the global MeterProvider via set_meter_provider():
     like opentelemetry-instrumentation-*) would get a NoopMeterProvider and
     silently drop metrics. Setting the global ensures all OTEL-aware code in
     the process shares the same backend.
+
+WHY a View for histogram bucket boundaries:
+    OTEL SDK's default histogram buckets are generic and not tuned for HTTP
+    latency in milliseconds. Registering an explicit View with
+    ExplicitBucketHistogramAggregation for http_request_duration_ms ensures
+    Prometheus receives the precise bucket boundaries defined in _infra.py,
+    enabling accurate p50/p95/p99 SLO calculations without requiring each
+    service to configure Views themselves.
 """
 
 from __future__ import annotations
@@ -27,8 +35,16 @@ from opentelemetry import metrics as otel_metrics
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
 
 from ._config import MetricsConfig
+
+# Histogram bucket boundaries for HTTP latency (ms). Defined here so the View
+# can reference them without importing from _infra (which would create a
+# circular dependency: _infra → _provider → _infra).
+_HTTP_DURATION_BOUNDARIES_MS: list[float] = [
+    5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000
+]
 
 # Module-level reference so we can check for double-initialization.
 _meter_provider: MeterProvider | None = None
@@ -62,7 +78,20 @@ def initialize_provider(config: MetricsConfig) -> None:
         export_interval_millis=config.export_interval_ms,
     )
 
-    _meter_provider = MeterProvider(metric_readers=[reader])
+    # View that pins the http_request_duration_ms histogram to our explicit
+    # bucket boundaries. Without this View, the OTEL SDK uses default buckets
+    # which are too coarse for millisecond latency at the low end.
+    http_duration_view = View(
+        instrument_name="http_request_duration_ms",
+        aggregation=ExplicitBucketHistogramAggregation(
+            boundaries=_HTTP_DURATION_BOUNDARIES_MS
+        ),
+    )
+
+    _meter_provider = MeterProvider(
+        metric_readers=[reader],
+        views=[http_duration_view],
+    )
 
     # Register globally so opentelemetry-instrumentation-* libraries and any
     # future SDK helpers automatically use the same backend.
