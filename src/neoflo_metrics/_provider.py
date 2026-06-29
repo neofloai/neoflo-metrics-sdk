@@ -97,6 +97,26 @@ CLAUDE_COST_SLA_USD: dict[str, float] = {"p90": 0.05, "p95": 0.10, "p99": 0.25}
 # Module-level reference so we can check for double-initialization.
 _meter_provider: MeterProvider | None = None
 
+# Views collected via register_view() before the provider is created are
+# passed to MeterProvider() at construction time. Views registered after
+# construction fall back to add_view() if the SDK supports it.
+_pending_views: list[View] = []
+
+
+def register_view(view: View) -> None:
+    """Register a histogram View. Safe to call before or after initialize_provider().
+
+    Before provider creation: view is queued and passed to MeterProvider constructor.
+    After provider creation: add_view() is called if supported (OTel >= 1.12.0),
+    otherwise the view is silently dropped (custom buckets unavailable on old SDK).
+    """
+    global _pending_views
+    if _meter_provider is None:
+        _pending_views.append(view)
+    elif hasattr(_meter_provider, "add_view"):
+        _meter_provider.add_view(view)
+    # else: old OTel SDK — custom buckets not available, instrument uses defaults
+
 
 def initialize_provider(config: MetricsConfig) -> None:
     """Create and globally register the MeterProvider.
@@ -138,7 +158,7 @@ def initialize_provider(config: MetricsConfig) -> None:
 
     _meter_provider = MeterProvider(
         metric_readers=[reader],
-        views=[http_duration_view],
+        views=[http_duration_view, *_pending_views],
     )
 
     # Register globally so opentelemetry-instrumentation-* libraries and any
