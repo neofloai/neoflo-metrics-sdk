@@ -34,6 +34,17 @@ class MetricsConfig:
     environment: str = "production"
     export_interval_ms: int = 5000
 
+    def __post_init__(self) -> None:
+        if not self.service_name or not self.service_name.strip():
+            raise ValueError("service_name cannot be empty")
+        if not self.otlp_endpoint or not (
+            self.otlp_endpoint.startswith("http://")
+            or self.otlp_endpoint.startswith("grpc://")
+        ):
+            raise ValueError("otlp_endpoint must start with http:// or grpc://")
+        if self.export_interval_ms < 1000:
+            raise ValueError("export_interval_ms must be >= 1000ms")
+
 
 # Module-level singleton — None until configure_metrics() is called.
 _config: MetricsConfig | None = None

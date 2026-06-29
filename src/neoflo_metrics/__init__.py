@@ -33,22 +33,44 @@ from __future__ import annotations
 
 import threading
 
-from ._business import BusinessMetrics, create_metrics
+from ._business import BusinessMetrics, MetricSpec, SLASpec, create_metrics
 from ._config import MetricsConfig, get_config, set_config
 from ._infra import SystemMetricsCollector
-from ._provider import initialize_provider
+from ._provider import (
+    initialize_provider,
+    SQS_PROCESSING_BOUNDARIES_MS,
+    MONGO_DURATION_BOUNDARIES_MS,
+    CLAUDE_COST_BOUNDARIES_USD,
+    HTTP_SLA_MS,
+    SQS_SLA_MS,
+    MONGO_SLA_MS,
+    CLAUDE_DURATION_SLA_MS,
+    CLAUDE_COST_SLA_USD,
+)
 
 __all__ = [
     "configure_metrics",
+    "shutdown_metrics",
     "create_metrics",
+    "MetricSpec",
+    "SLASpec",
     "MetricsConfig",
     "BusinessMetrics",
+    "SQS_PROCESSING_BOUNDARIES_MS",
+    "MONGO_DURATION_BOUNDARIES_MS",
+    "CLAUDE_COST_BOUNDARIES_USD",
+    "HTTP_SLA_MS",
+    "SQS_SLA_MS",
+    "MONGO_SLA_MS",
+    "CLAUDE_DURATION_SLA_MS",
+    "CLAUDE_COST_SLA_USD",
 ]
 
 # Guards against double-initialization (e.g., configure_metrics() called twice
 # in tests or by misconfigured service startup code).
 _initialized = False
 _init_lock = threading.Lock()
+_collector: SystemMetricsCollector | None = None
 
 
 def configure_metrics(
@@ -99,7 +121,19 @@ def configure_metrics(
 
         # Start system metrics collection immediately — not on first request —
         # so uptime and resource metrics are available from process boot.
-        collector = SystemMetricsCollector()
-        collector.start()
+        global _collector
+        _collector = SystemMetricsCollector()
+        _collector.start()
 
         _initialized = True
+
+
+def shutdown_metrics() -> None:
+    """Stop background metrics collection. Call from ASGI lifespan shutdown.
+
+    Safe to call even if configure_metrics() was never called (no-op).
+    Allows clean teardown in tests and on ECS container SIGTERM so the last
+    system metric readings are flushed before the process exits.
+    """
+    if _collector is not None:
+        _collector.stop()

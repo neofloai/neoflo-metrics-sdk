@@ -118,6 +118,16 @@ def get_http_instruments() -> dict[str, Any]:
                 description="Total number of HTTP 4xx/5xx responses",
                 unit="1",
             ),
+            "client_errors_total": meter.create_counter(
+                name="http_request_client_errors_total",
+                description="Total number of HTTP 4xx responses",
+                unit="1",
+            ),
+            "server_errors_total": meter.create_counter(
+                name="http_request_server_errors_total",
+                description="Total number of HTTP 5xx responses",
+                unit="1",
+            ),
             # Store common labels so middleware can merge them with per-request labels.
             "_common_labels": common,
         }
@@ -184,6 +194,7 @@ class SystemMetricsCollector:
         )
 
         self._process = psutil.Process()
+        self._process.cpu_percent(interval=None)  # warm-up: first call always returns 0.0
         self._start_time = self._process.create_time()
         self._last_uptime: float = 0.0
 
