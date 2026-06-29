@@ -56,10 +56,14 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
-from starlette.routing import Route
+try:
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import Response
+    from starlette.routing import Route
+    _starlette_available = True
+except ImportError:
+    _starlette_available = False
 
 from ._infra import get_http_instruments
 
@@ -69,8 +73,16 @@ logger = logging.getLogger(__name__)
 RequestResponseEndpoint = Callable[[Request], Awaitable[Response]]
 
 
-class MetricsMiddleware(BaseHTTPMiddleware):
+class MetricsMiddleware(BaseHTTPMiddleware if _starlette_available else object):
     """Automatic HTTP metrics middleware for Starlette/FastAPI."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if not _starlette_available:
+            raise RuntimeError(
+                "MetricsMiddleware requires starlette. "
+                "Install it with: pip install 'neoflo-metrics[starlette]'"
+            )
+        super().__init__(*args, **kwargs)
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         # Resolve route template early; fall back to raw path if routing hasn't
@@ -111,6 +123,10 @@ class MetricsMiddleware(BaseHTTPMiddleware):
 
                 if response.status_code >= 400:
                     instruments["errors_total"].add(1, attributes=labels)
+                if 400 <= response.status_code < 500:
+                    instruments["client_errors_total"].add(1, attributes=labels)
+                elif response.status_code >= 500:
+                    instruments["server_errors_total"].add(1, attributes=labels)
 
             except Exception:
                 logger.exception("MetricsMiddleware: failed to record post-request metrics")

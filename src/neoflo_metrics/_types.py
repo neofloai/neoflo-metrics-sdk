@@ -74,14 +74,19 @@ class Gauge:
     Implemented over UpDownCounter with internal state tracking so that
     .set(42) translates to add(42 - current_value) on the underlying counter.
 
-    Thread-safety: _lock protects both _current_value and _instrument.add()
+    Thread-safety: _lock protects both _values and _instrument.add()
     to prevent delta races between concurrent .set()/.add() calls in
     multi-threaded ASGI servers (uvicorn workers, etc.).
+
+    Per-label state: each unique label combination gets its own tracked value
+    so that .set(10, {"queue": "a"}) and .set(5, {"queue": "b"}) compute
+    independent deltas and don't corrupt each other's readings.
     """
 
     def __init__(self, instrument: otel_metrics.UpDownCounter) -> None:
         self._instrument = instrument
-        self._current_value: float = 0.0
+        # Keyed by sorted label tuple so each label combo tracks independently.
+        self._values: dict[tuple[tuple[str, str], ...], float] = {}
         # Lock must be held through both the value update AND the OTEL call.
         # See module docstring for the race condition this prevents.
         self._lock = threading.Lock()
@@ -89,16 +94,19 @@ class Gauge:
     def set(self, value: int | float, labels: Labels = None) -> None:
         """Set the gauge to an absolute value."""
         attrs = dict(labels) if labels else {}
+        key = tuple(sorted(attrs.items()))
         with self._lock:
-            delta = value - self._current_value
-            self._current_value = float(value)
+            current = self._values.get(key, 0.0)
+            delta = value - current
+            self._values[key] = float(value)
             # Inside the lock: prevents concurrent .set() calls from racing
-            # on _current_value and producing an incorrect cumulative delta.
+            # on _values and producing an incorrect cumulative delta.
             self._instrument.add(delta, attributes=attrs)
 
     def add(self, value: int | float, labels: Labels = None) -> None:
         """Increment or decrement the gauge by a relative amount."""
         attrs = dict(labels) if labels else {}
+        key = tuple(sorted(attrs.items()))
         with self._lock:
-            self._current_value += value
+            self._values[key] = self._values.get(key, 0.0) + value
             self._instrument.add(value, attributes=attrs)

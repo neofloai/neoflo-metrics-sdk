@@ -29,24 +29,67 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-from ._provider import get_meter
+from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
+
+from ._provider import get_meter, get_provider
 from ._types import Counter, Gauge, Histogram
 
 VALID_TYPES = frozenset({"counter", "histogram", "gauge"})
+
+
+def _merge_sla_boundaries(
+    boundaries: list[float],
+    sla: dict | None,
+) -> list[float]:
+    """Return a sorted, deduplicated boundary list that includes all SLA threshold values.
+
+    OTel's histogram_quantile() is exact when the target percentile value is a
+    bucket boundary. If 500ms is an SLA threshold but falls between two buckets
+    (e.g. 250ms and 1000ms), the estimate is linearly interpolated and can be
+    off by hundreds of milliseconds. Injecting the SLA value as a boundary
+    eliminates that error at the threshold point.
+    """
+    if not sla:
+        return boundaries
+    extra = [v for v in sla.values() if v is not None]
+    if not extra:
+        return boundaries
+    return sorted(set(boundaries) | set(extra))
+
+
+class SLASpec(TypedDict, total=False):
+    """SLA threshold values for histogram metrics, in the same unit as the histogram.
+
+    Each declared value is automatically injected into bucket_boundaries so that
+    histogram_quantile() estimates are exact at the threshold, not interpolated.
+    Units match the parent metric (ms for duration histograms, USD for cost histograms).
+    """
+
+    p90: float
+    p95: float
+    p99: float
 
 
 class MetricSpec(TypedDict, total=False):
     """Schema for a single metric entry in the create_metrics() spec dict.
 
     Attributes:
-        type:        Required. One of "counter", "histogram", "gauge".
-        description: Human-readable description of what this metric measures.
-        unit:        OTEL unit string (e.g. "1", "ms", "By"). Defaults to "1".
+        type:              Required. One of "counter", "histogram", "gauge".
+        description:       Human-readable description of what this metric measures.
+        unit:              OTEL unit string (e.g. "1", "ms", "By"). Defaults to "1".
+        bucket_boundaries: Custom histogram bucket edges. SLA threshold values are
+                           automatically merged in if sla= is also provided.
+        sla:               SLA thresholds in the same unit as the metric. When provided
+                           alongside bucket_boundaries, threshold values are merged into
+                           the bucket list for accurate histogram_quantile() estimates.
+                           Use the pre-defined constants: SQS_SLA_MS, MONGO_SLA_MS, etc.
     """
 
     type: str        # required — validated at runtime
     description: str
     unit: str
+    bucket_boundaries: list[float]
+    sla: SLASpec
 
 
 class BusinessMetrics:
@@ -106,6 +149,23 @@ def create_metrics(spec: dict[str, MetricSpec]) -> BusinessMetrics:
             instrument: Counter | Histogram | Gauge = Counter(otel_instrument)
 
         elif metric_type == "histogram":
+            bucket_boundaries = meta.get("bucket_boundaries")
+            if bucket_boundaries:
+                # Merge SLA threshold values into boundaries so histogram_quantile()
+                # is exact at those points. If no sla= is given, boundaries are unchanged.
+                effective_boundaries = _merge_sla_boundaries(
+                    bucket_boundaries, meta.get("sla")
+                )
+                # Register a View so the MeterProvider uses these bucket edges
+                # instead of the SDK default. Must be done before the instrument
+                # is created so the View is in place when the first .record() fires.
+                view = View(
+                    instrument_name=name,
+                    aggregation=ExplicitBucketHistogramAggregation(
+                        boundaries=effective_boundaries
+                    ),
+                )
+                get_provider().add_view(view)
             otel_instrument = meter.create_histogram(
                 name=name,
                 description=description,
