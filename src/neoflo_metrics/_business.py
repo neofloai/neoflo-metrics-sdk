@@ -31,7 +31,7 @@ from typing import TypedDict
 
 from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
 
-from ._provider import get_meter, get_provider
+from ._provider import get_meter, register_view
 from ._types import Counter, Gauge, Histogram
 
 VALID_TYPES = frozenset({"counter", "histogram", "gauge"})
@@ -165,7 +165,7 @@ def create_metrics(spec: dict[str, MetricSpec]) -> BusinessMetrics:
                         boundaries=effective_boundaries
                     ),
                 )
-                get_provider().add_view(view)
+                register_view(view)
             otel_instrument = meter.create_histogram(
                 name=name,
                 description=description,
