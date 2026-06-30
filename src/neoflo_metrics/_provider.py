@@ -131,7 +131,7 @@ def initialize_provider(config: MetricsConfig) -> None:
         return
 
     exporter = OTLPMetricExporter(
-        endpoint=config.otlp_endpoint,
+        endpoint=config.otlp_endpoint.rstrip("/") + "/v1/metrics",
     )
 
     reader = PeriodicExportingMetricReader(
