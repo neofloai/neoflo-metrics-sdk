@@ -32,7 +32,7 @@ WHY a View for histogram bucket boundaries:
 from __future__ import annotations
 
 from opentelemetry import metrics as otel_metrics
-from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
@@ -132,10 +132,6 @@ def initialize_provider(config: MetricsConfig) -> None:
 
     exporter = OTLPMetricExporter(
         endpoint=config.otlp_endpoint,
-        # insecure=True is intentional for internal cluster traffic where
-        # mTLS is handled at the service mesh layer (Istio/Linkerd), not
-        # at the application layer.
-        insecure=True,
     )
 
     reader = PeriodicExportingMetricReader(
