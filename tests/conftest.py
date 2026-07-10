@@ -6,6 +6,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 import neoflo_metrics._provider as _provider_module
 import neoflo_metrics._config as _config_module
+import neoflo_metrics._infra as _infra_module
 import neoflo_metrics as sdk
 
 
@@ -49,4 +50,10 @@ def inmemory_sdk():
     sdk._collector = None
     _provider_module._meter_provider = None
     _config_module._config = None
+    # _http_instruments is a lazily-created module-level cache bound to
+    # whichever MeterProvider was active on its first call (see _infra.py).
+    # Without resetting it here, the next test's fresh provider/reader is
+    # silently never used — instruments keep recording into this test's
+    # already-torn-down provider.
+    _infra_module._http_instruments = None
     otel_metrics.set_meter_provider(otel_metrics.NoOpMeterProvider())

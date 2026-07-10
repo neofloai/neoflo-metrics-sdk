@@ -1,0 +1,112 @@
+# neoflo-metrics — publish wheel + sdist to AWS CodeArtifact
+#
+# Triggered by tag pushes matching v* (e.g. v0.1.0, v1.2.3-rc1).
+# Branch pushes do NOT publish — the IAM trust policy blocks that path
+# at the AWS side too, so this is belt-and-braces.
+#
+# Account 440744259111 · region ap-south-1 · domain neoflo · repo neoflo-metrics.
+# The publish role is SHARED across every package registered in
+# neoflo-packages-publishing/packages.json — see that repo's README.md.
+
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write   # OIDC -> AWS
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout (full history so the tag is visible)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build + twine
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+
+      - name: Assert pyproject.toml version matches git tag
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          # Strip leading 'v' from the tag — v0.1.0 -> 0.1.0
+          EXPECTED="${TAG#v}"
+          ACTUAL=$(python -c "
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+          version = (data.get('project') or {}).get('version') \
+                 or ((data.get('tool') or {}).get('poetry') or {}).get('version')
+          print(version)
+          ")
+          echo "tag=${TAG} → expected=${EXPECTED} | pyproject=${ACTUAL}"
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::Version mismatch — bump pyproject.toml.version to ${EXPECTED} or retag."
+            exit 1
+          fi
+
+      - name: Run tests (if any)
+        run: |
+          if [ -d "tests" ]; then
+            if python -m pip install ".[dev]" 2>/dev/null; then
+              echo "Installed with [dev] extra"
+            elif python -m pip install ".[test]" 2>/dev/null; then
+              echo "Installed with [test] extra"
+            else
+              echo "No dev/test extra — installing minimum (pytest, pytest-cov)"
+              python -m pip install . pytest pytest-cov
+            fi
+            pytest -q
+          else
+            echo "No tests/ directory — skipping pytest. (Add tests/ to enable the gate.)"
+          fi
+
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::440744259111:role/GitHubActions-NeofloPackages-Publish
+          aws-region: ap-south-1
+
+      - name: Log in to CodeArtifact for twine
+        run: |
+          aws codeartifact login \
+            --tool twine \
+            --domain neoflo \
+            --repository neoflo-metrics \
+            --region ap-south-1
+
+      - name: Upload to CodeArtifact
+        run: twine upload --repository codeartifact dist/*
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published"
+            echo ""
+            echo "- Package: \`neoflo-metrics\`"
+            echo "- Version: \`${GITHUB_REF_NAME#v}\`"
+            echo ""
+            echo "Install in a consumer:"
+            echo ""
+            echo "\`\`\`bash"
+            echo "aws codeartifact login --tool pip --domain neoflo --repository neoflo-metrics --profile aws_rnd"
+            echo "pip install neoflo-metrics==${GITHUB_REF_NAME#v}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"

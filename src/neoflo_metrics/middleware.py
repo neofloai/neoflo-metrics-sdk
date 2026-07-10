@@ -157,8 +157,17 @@ def _extract_route(request: Request) -> str:
     Using the template (/items/{item_id}) instead of the resolved path
     (/items/42) bounds metric cardinality to the number of routes, not
     the number of unique parameter values.
+
+    The installed Starlette version does not expose the matched Route object
+    directly in scope (there is no scope["route"]) — only scope["endpoint"]
+    (the handler) and scope["router"] (set by Router.app()). The route
+    template is recovered by looking up scope["endpoint"] against the
+    router's registered routes.
     """
-    route = request.scope.get("route")
-    if isinstance(route, Route):
-        return route.path
+    endpoint = request.scope.get("endpoint")
+    router = request.scope.get("router")
+    if endpoint is not None and router is not None:
+        for route in getattr(router, "routes", []):
+            if isinstance(route, Route) and route.endpoint is endpoint:
+                return route.path
     return request.url.path

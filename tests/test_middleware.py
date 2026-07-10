@@ -6,14 +6,23 @@ import pytest
 def test_import_without_starlette_does_not_crash(monkeypatch):
     """Importing neoflo_metrics must not raise even if starlette is missing."""
     import sys
+    import importlib
+
+    # Ensure starlette + the middleware module are actually imported before
+    # hiding them below. If nothing in the session has imported them yet,
+    # sys.modules has no "starlette" keys to hide — the poisoning below would
+    # be a silent no-op and this test would exercise the real-starlette path
+    # instead of the missing-starlette path.
+    import starlette  # noqa: F401
+    import neoflo_metrics.middleware as mw
+    importlib.reload(mw)
+
     # Simulate starlette being absent by temporarily hiding the module.
     starlette_modules = {k: v for k, v in sys.modules.items() if "starlette" in k}
     for key in starlette_modules:
         sys.modules[key] = None  # type: ignore[assignment]
     try:
         # Re-importing the middleware module should not raise at module level.
-        import importlib
-        import neoflo_metrics.middleware as mw
         importlib.reload(mw)
         # Only instantiation should raise.
         with pytest.raises(RuntimeError, match="neoflo-metrics\\[starlette\\]"):
@@ -21,6 +30,10 @@ def test_import_without_starlette_does_not_crash(monkeypatch):
     finally:
         for key in starlette_modules:
             sys.modules[key] = starlette_modules[key]
+        # Restore mw to its real, starlette-available state for later tests —
+        # otherwise it stays poisoned (object base, _starlette_available=False)
+        # for every test that runs after this one.
+        importlib.reload(mw)
 
 
 def test_client_and_server_errors_counted_separately(inmemory_sdk):
