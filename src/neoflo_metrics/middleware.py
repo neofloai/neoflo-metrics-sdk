@@ -19,21 +19,39 @@ WHY perf_counter for timing:
 
 WHY exception handling wraps ONLY the metrics code:
     The fundamental contract of this middleware is "metrics collection must
-    never break the application". If we wrapped `await call_next(request)` in
-    the same try/except, a metrics failure would silently swallow request
-    errors, making debugging extremely difficult. The structure is:
+    never break the application". Metrics failures are swallowed; request
+    errors are not. `await call_next(request)` IS wrapped in try/except, but
+    that except records the failure as a 500 and RE-RAISES — it never swallows.
+    The structure is:
 
         instruments, base_labels = None, {}   # sentinels — always defined
         try:
             [metrics pre-request]
         except:
             instruments = None  # disable post-request recording
-        response = await call_next(request)   # <-- never inside a swallowing except
+        try:
+            response = await call_next(request)
+        except:
+            [record as status_code=500, swallowing only metrics errors]
+            raise                              # <-- request errors always propagate
+        finally:
+            [decrement in_flight — every exit path, or the gauge leaks]
         try:
             [metrics post-request, guarded by instruments is not None]
         except:
             pass
         return response
+
+WHY unhandled exceptions are recorded as 500:
+    An exception that escapes the app is converted to a 500 response by
+    outer middleware (service ExceptionMiddleware or Starlette's
+    ServerErrorMiddleware) — outside this middleware, invisible to it.
+    Without recording here, crash-500s never reach error-rate metrics and
+    alerts, and the in_flight increment leaks permanently (observed as
+    impossible in-flight values in the hundreds).
+    CancelledError (client disconnect) is deliberately NOT recorded as a 500
+    — it does not inherit from Exception in Python 3.8+ — but the finally
+    still decrements in_flight for it.
 
 WHY extract route AFTER call_next, not before:
     request.url.path gives the full path with path parameters resolved
@@ -117,10 +135,38 @@ class MetricsMiddleware(BaseHTTPMiddleware if _starlette_available else object):
             logger.exception("MetricsMiddleware: failed to record pre-request metrics")
             instruments = None  # Disable post-request metrics too.
 
-        # --- Actual request handling — MUST NOT be inside a metrics try/except ---
+        # --- Actual request handling ---
         # perf_counter gives monotonic, high-resolution timing unaffected by NTP.
+        # An unhandled exception from the app is recorded as a 500 and RE-RAISED —
+        # metrics failures still cannot swallow request errors (except blocks below
+        # only wrap metrics code). Without this, exception responses produced by
+        # outer middleware (e.g. Starlette's ServerErrorMiddleware) are invisible
+        # to error-rate metrics, and the in_flight increment leaks permanently.
         start = time.perf_counter()
-        response: Response = await call_next(request)
+        try:
+            response: Response = await call_next(request)
+        except Exception:
+            if instruments is not None:
+                try:
+                    duration_ms = (time.perf_counter() - start) * 1000
+                    labels = {**common, "route": _extract_route(request), "method": method, "status_code": "500"}
+                    instruments["duration"].record(duration_ms, attributes=labels)
+                    instruments["requests_total"].add(1, attributes=labels)
+                    instruments["errors_total"].add(1, attributes=labels)
+                    instruments["server_errors_total"].add(1, attributes=labels)
+                except Exception:
+                    logger.exception("MetricsMiddleware: failed to record exception metrics")
+            raise
+        finally:
+            # in_flight must decrement on every exit path — success, HTTP error,
+            # unhandled exception, or client disconnect (CancelledError) — or the
+            # gauge drifts upward forever.
+            if instruments is not None:
+                try:
+                    instruments["in_flight"].add(-1, attributes=in_flight_labels)
+                except Exception:
+                    logger.exception("MetricsMiddleware: failed to decrement in_flight")
+
         duration_ms = (time.perf_counter() - start) * 1000
 
         # Route template is now resolved — FastAPI populates scope["route"] during
@@ -134,7 +180,6 @@ class MetricsMiddleware(BaseHTTPMiddleware if _starlette_available else object):
                 base_labels = {**common, "route": route, "method": method}
                 labels = {**base_labels, "status_code": status_code}
 
-                instruments["in_flight"].add(-1, attributes=in_flight_labels)
                 instruments["duration"].record(duration_ms, attributes=labels)
                 instruments["requests_total"].add(1, attributes=labels)
 
