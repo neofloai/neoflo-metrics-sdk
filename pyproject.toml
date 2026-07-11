@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "neoflo-metrics"
-version = "0.1.0"
+version = "0.1.1"
 description = "Neoflo platform metrics SDK for Python microservices"
 requires-python = ">=3.11"
 dependencies = [
