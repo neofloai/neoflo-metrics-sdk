@@ -41,6 +41,8 @@ from collections.abc import Mapping
 
 from opentelemetry import metrics as otel_metrics
 
+from ._labels import sanitize_labels
+
 # Labels type uses Mapping (read-only view) instead of dict to signal that the
 # SDK does not mutate the caller's labels dict, and to accept any mapping type.
 Labels = Mapping[str, str] | None
@@ -53,8 +55,12 @@ class Counter:
         self._instrument = instrument
 
     def add(self, value: int | float, labels: Labels = None) -> None:
-        """Increment the counter by value. Labels become OTEL Attributes."""
-        self._instrument.add(value, attributes=dict(labels) if labels else {})
+        """Increment the counter by value. Labels become OTEL Attributes.
+
+        Labels pass through sanitize_labels() so sensitive-named keys (password,
+        token, email, ...) are dropped before they reach the backend (see _labels.py).
+        """
+        self._instrument.add(value, attributes=sanitize_labels(labels))
 
 
 class Histogram:
@@ -64,8 +70,11 @@ class Histogram:
         self._instrument = instrument
 
     def record(self, value: int | float, labels: Labels = None) -> None:
-        """Record a single observation. Labels become OTEL Attributes."""
-        self._instrument.record(value, attributes=dict(labels) if labels else {})
+        """Record a single observation. Labels become OTEL Attributes.
+
+        Labels pass through sanitize_labels() (see _labels.py).
+        """
+        self._instrument.record(value, attributes=sanitize_labels(labels))
 
 
 class Gauge:
@@ -92,8 +101,8 @@ class Gauge:
         self._lock = threading.Lock()
 
     def set(self, value: int | float, labels: Labels = None) -> None:
-        """Set the gauge to an absolute value."""
-        attrs = dict(labels) if labels else {}
+        """Set the gauge to an absolute value. Labels pass through sanitize_labels()."""
+        attrs = sanitize_labels(labels)
         key = tuple(sorted(attrs.items()))
         with self._lock:
             current = self._values.get(key, 0.0)
@@ -104,8 +113,8 @@ class Gauge:
             self._instrument.add(delta, attributes=attrs)
 
     def add(self, value: int | float, labels: Labels = None) -> None:
-        """Increment or decrement the gauge by a relative amount."""
-        attrs = dict(labels) if labels else {}
+        """Increment or decrement the gauge by a relative amount. Labels pass through sanitize_labels()."""
+        attrs = sanitize_labels(labels)
         key = tuple(sorted(attrs.items()))
         with self._lock:
             self._values[key] = self._values.get(key, 0.0) + value
