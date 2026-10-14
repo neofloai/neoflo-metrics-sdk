@@ -37,11 +37,19 @@ class MetricsConfig:
     def __post_init__(self) -> None:
         if not self.service_name or not self.service_name.strip():
             raise ValueError("service_name cannot be empty")
-        if not self.otlp_endpoint or not (
-            self.otlp_endpoint.startswith("http://")
-            or self.otlp_endpoint.startswith("grpc://")
+        # https:// matters as much as http://: a service running outside our
+        # own VPC reaches the collector over the public internet, where TLS is
+        # not optional. Leaving it out did not fail loudly — the caller wraps
+        # configure_metrics() in a try/except, so the ValueError was swallowed,
+        # no MeterProvider was ever built, and every request then logged
+        # "MeterProvider not initialized" from the middleware while the service
+        # kept serving traffic with no metrics at all.
+        if not self.otlp_endpoint or not self.otlp_endpoint.startswith(
+            ("http://", "https://", "grpc://")
         ):
-            raise ValueError("otlp_endpoint must start with http:// or grpc://")
+            raise ValueError(
+                "otlp_endpoint must start with http://, https:// or grpc://"
+            )
         if self.export_interval_ms < 1000:
             raise ValueError("export_interval_ms must be >= 1000ms")
 
