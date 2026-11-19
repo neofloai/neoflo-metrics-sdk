@@ -36,6 +36,7 @@ import threading
 from ._business import BusinessMetrics, MetricSpec, SLASpec, create_metrics
 from ._config import MetricsConfig, get_config, set_config
 from ._infra import SystemMetricsCollector
+from ._tenant import get_tenant, reset_tenant, set_tenant, tenant_context
 from ._provider import (
     initialize_provider,
     SQS_PROCESSING_BOUNDARIES_MS,
@@ -56,6 +57,10 @@ __all__ = [
     "SLASpec",
     "MetricsConfig",
     "BusinessMetrics",
+    "set_tenant",
+    "reset_tenant",
+    "get_tenant",
+    "tenant_context",
     "SQS_PROCESSING_BOUNDARIES_MS",
     "MONGO_DURATION_BOUNDARIES_MS",
     "CLAUDE_COST_BOUNDARIES_USD",

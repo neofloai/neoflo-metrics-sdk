@@ -42,10 +42,16 @@ from collections.abc import Mapping
 from opentelemetry import metrics as otel_metrics
 
 from ._labels import sanitize_labels
+from ._tenant import tenant_labels
 
 # Labels type uses Mapping (read-only view) instead of dict to signal that the
 # SDK does not mutate the caller's labels dict, and to accept any mapping type.
 Labels = Mapping[str, str] | None
+
+
+def _with_tenant(labels: Labels) -> dict[str, str]:
+    """Sanitize labels, adding the context tenant unless the caller set tenant_id."""
+    return sanitize_labels({**tenant_labels(), **(labels or {})})
 
 
 class Counter:
@@ -60,7 +66,7 @@ class Counter:
         Labels pass through sanitize_labels() so sensitive-named keys (password,
         token, email, ...) are dropped before they reach the backend (see _labels.py).
         """
-        self._instrument.add(value, attributes=sanitize_labels(labels))
+        self._instrument.add(value, attributes=_with_tenant(labels))
 
 
 class Histogram:
@@ -74,7 +80,7 @@ class Histogram:
 
         Labels pass through sanitize_labels() (see _labels.py).
         """
-        self._instrument.record(value, attributes=sanitize_labels(labels))
+        self._instrument.record(value, attributes=_with_tenant(labels))
 
 
 class Gauge:
@@ -102,7 +108,7 @@ class Gauge:
 
     def set(self, value: int | float, labels: Labels = None) -> None:
         """Set the gauge to an absolute value. Labels pass through sanitize_labels()."""
-        attrs = sanitize_labels(labels)
+        attrs = _with_tenant(labels)
         key = tuple(sorted(attrs.items()))
         with self._lock:
             current = self._values.get(key, 0.0)
@@ -114,7 +120,7 @@ class Gauge:
 
     def add(self, value: int | float, labels: Labels = None) -> None:
         """Increment or decrement the gauge by a relative amount. Labels pass through sanitize_labels()."""
-        attrs = sanitize_labels(labels)
+        attrs = _with_tenant(labels)
         key = tuple(sorted(attrs.items()))
         with self._lock:
             self._values[key] = self._values.get(key, 0.0) + value

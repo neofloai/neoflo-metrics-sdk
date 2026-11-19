@@ -148,3 +148,21 @@ sum(rate(mongodb_operation_duration_ms_bucket{le="50"}[5m]))
 | `MONGO_SLA_MS` | 25 ms | 50 ms | 250 ms |
 | `CLAUDE_DURATION_SLA_MS` | 10 s | 30 s | 60 s |
 | `CLAUDE_COST_SLA_USD` | $0.05 | $0.10 | $0.25 |
+
+## Per-tenant labels (`tenant_id`)
+
+For multi-tenant (SaaS) services, the SDK adds a `tenant_id` label:
+
+- **HTTP:** `MetricsMiddleware` reads the `X-Tenant-ID` header and labels every HTTP metric. It also sets the tenant for the request, so business metrics emitted inside a handler get the same label.
+- **SQS:** pass the message's tenant: `sqs_handler_timer(metrics, queue_name="q", tenant_id=body.get("tenant_id"))`.
+- **Other code:** `with tenant_context(tenant_id): ...` (or `set_tenant()` / `reset_tenant()`).
+
+Values come from client-controlled input, so they are validated against `^[a-zA-Z0-9\-_]{1,64}$` and capped:
+
+| Input | Label value |
+|-------|-------------|
+| Valid id | the id |
+| Missing or invalid | `-` |
+| More distinct tenants than the cap | `other` |
+
+The cap is `METRICS_MAX_TENANTS` (default 10). The first N distinct valid values take the slots. On-prem single-tenant services keep using the process-level `client` resource attribute.
