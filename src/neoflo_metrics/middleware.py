@@ -96,6 +96,7 @@ except ImportError:
     _starlette_available = False
 
 from ._infra import get_http_instruments
+from ._tenant import TENANT_LABEL, get_tenant, reset_tenant, set_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,13 @@ class MetricsMiddleware(BaseHTTPMiddleware if _starlette_available else object):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         method = request.method
 
+        # Tenant comes from the raw X-Tenant-ID header: validated and capped in
+        # normalize_tenant(), so bad or excess values cannot create new series.
+        # Set in the context so business metrics emitted inside the request
+        # inherit it (the endpoint task copies the context when created).
+        tenant_token = set_tenant(request.headers.get("x-tenant-id"))
+        tenant = get_tenant()
+
         # Sentinel defaults — declared before any try block so they are always
         # defined at the post-request guard, regardless of where an exception fires.
         instruments: dict[str, Any] | None = None
@@ -128,7 +136,7 @@ class MetricsMiddleware(BaseHTTPMiddleware if _starlette_available else object):
         # inside call_next. Track in_flight without route label.
         try:
             instruments = get_http_instruments()
-            common = instruments["_common_labels"]
+            common = {**instruments["_common_labels"], TENANT_LABEL: tenant}
             in_flight_labels = {**common, "method": method}
             instruments["in_flight"].add(1, attributes=in_flight_labels)
         except Exception:
@@ -158,6 +166,7 @@ class MetricsMiddleware(BaseHTTPMiddleware if _starlette_available else object):
                     logger.exception("MetricsMiddleware: failed to record exception metrics")
             raise
         finally:
+            reset_tenant(tenant_token)
             # in_flight must decrement on every exit path — success, HTTP error,
             # unhandled exception, or client disconnect (CancelledError) — or the
             # gauge drifts upward forever.
